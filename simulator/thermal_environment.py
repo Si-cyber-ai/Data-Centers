@@ -185,6 +185,12 @@ class DataCenterThermalEnv(gym.Env):
             self.max_cooling_change
         )
         self.cooling_levels = self.prev_cooling_levels + cooling_delta
+        
+        # Cooling floor safety: if avg temp > 70°C, enforce minimum cooling of 0.2
+        avg_temp = np.mean(self.temperatures) if self.temperatures is not None else 0
+        if avg_temp > 70.0:
+            self.cooling_levels = np.maximum(self.cooling_levels, 0.2)
+        
         self.prev_cooling_levels = self.cooling_levels.copy()
         
         # Update CPU workload
@@ -220,7 +226,7 @@ class DataCenterThermalEnv(gym.Env):
         
         # Check termination conditions
         self.current_step += 1
-        terminated = critical_violations > 0  # Terminate if critical violation
+        terminated = np.any(self.temperatures > self.critical_temp)  # Only terminate on critical
         truncated = self.current_step >= self.max_steps
         
         observation = self._get_observation()
@@ -267,6 +273,12 @@ class DataCenterThermalEnv(gym.Env):
         """
         Compute reward based on energy efficiency and safety.
         
+        Reward = -energy_cost - 10 * temperature_excess - 50 * safety_violation - 0.5 * cooling_instability
+        
+        Where:
+            temperature_excess = max(0, temperature - safe_temperature)
+            safety_violation = 1 if any rack > max_temp else 0
+        
         Args:
             violations: Number of temperature violations
             critical_violations: Number of critical violations
@@ -274,31 +286,31 @@ class DataCenterThermalEnv(gym.Env):
         Returns:
             Reward value
         """
-        # Energy consumption penalty (proportional to cooling effort)
-        energy_cost = np.mean(self.cooling_levels) * self.config['reward']['energy_weight']
+        # Energy consumption cost (proportional to cooling effort)
+        energy_cost = np.mean(self.cooling_levels)
         
-        # Temperature violation penalty
-        violation_penalty = (
-            violations * self.config['reward']['temperature_violation_weight']
-            + critical_violations * self.config['reward']['temperature_violation_weight'] * 5
-        )
+        # Temperature excess penalty: per-rack overshoot beyond safe threshold
+        safe_temp = self.config['safety']['max_temperature']
+        temperature_excess = np.sum(np.maximum(0.0, self.temperatures - safe_temp))
         
-        # Temperature stability reward (prefer temperatures near optimal)
-        optimal_temp = self.config['reward']['comfort_zone_temp']
-        temp_deviation = np.mean(np.abs(self.temperatures - optimal_temp))
-        stability_penalty = temp_deviation * self.config['reward']['stability_weight']
+        # Safety violation: binary per-rack violation count
+        safety_violation = violations + critical_violations * 5
         
-        # Cooling instability penalty (avoid rapid changes)
+        # Cooling instability: penalize rapid cooling changes
         if len(self.cooling_history) > 1:
-            cooling_change = np.mean(np.abs(
+            cooling_instability = np.mean(np.abs(
                 self.cooling_history[-1] - self.cooling_history[-2]
             ))
-            instability_penalty = cooling_change * 50.0
         else:
-            instability_penalty = 0.0
+            cooling_instability = 0.0
         
         # Total reward
-        reward = -(energy_cost + violation_penalty + stability_penalty + instability_penalty)
+        reward = (
+            - energy_cost
+            - 10.0 * temperature_excess
+            - 50.0 * safety_violation
+            - 0.5 * cooling_instability
+        )
         
         return reward
     

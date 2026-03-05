@@ -16,6 +16,7 @@ from datetime import datetime
 from rl_agent.dqn_agent import DQNAgent
 from simulator.thermal_environment import DataCenterThermalEnv
 from workload.synthetic_generator import SyntheticWorkloadGenerator
+from monitoring.training_logger import TrainingLogger
 
 
 class TrainingPipeline:
@@ -80,6 +81,7 @@ class TrainingPipeline:
             batch_size=self.config['rl']['batch_size'],
             memory_size=self.config['rl']['memory_size'],
             target_update_freq=self.config['rl']['target_update_freq'],
+            entropy_weight=self.config['rl'].get('entropy_weight', 0.01),
             device=device
         )
         
@@ -89,6 +91,9 @@ class TrainingPipeline:
         self.episode_avg_temps = []
         self.episode_violations = []
         self.episode_cooling_costs = []
+        
+        # Training logger for CSV output and dashboard
+        self.logger = TrainingLogger(log_dir=log_dir)
         
     def train(
         self,
@@ -151,7 +156,7 @@ class TrainingPipeline:
     
     def _run_episode(self) -> tuple:
         """
-        Run one training episode.
+        Run one training episode with per-step logging.
         
         Returns:
             Tuple of (total_reward, episode_info)
@@ -162,6 +167,7 @@ class TrainingPipeline:
         total_temp = 0.0
         total_violations = 0
         total_cooling = 0.0
+        episode_num = self.agent.episodes_done
         
         done = False
         
@@ -177,7 +183,7 @@ class TrainingPipeline:
             self.agent.store_transition(state, action, reward, next_state, done)
             
             # Train agent
-            self.agent.train_step()
+            loss = self.agent.train_step()
             
             # Update metrics
             episode_reward += reward
@@ -186,7 +192,25 @@ class TrainingPipeline:
             total_violations += info['hotspots']
             total_cooling += info['avg_cooling']
             
+            # Log step
+            self.logger.log_step(
+                episode=episode_num,
+                step=episode_length,
+                reward=reward,
+                avg_temperature=info['avg_temperature'],
+                max_temperature=info['max_temperature'],
+                cooling_level=info['avg_cooling'],
+                energy_consumption=info['avg_cooling'],
+                violations=info['hotspots'],
+                epsilon=self.agent.epsilon,
+                loss=loss,
+                action=action,
+            )
+            
             state = next_state
+        
+        # End episode logging
+        self.logger.end_episode(episode_num, self.agent.epsilon)
         
         episode_info = {
             'length': episode_length,

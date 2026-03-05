@@ -92,7 +92,14 @@ datacenter_ai_cooling/
 cd "e:\Sidharth\Websites\Data Centers"
 ```
 
-2. **Install dependencies**:
+2. **Create virtual environment** (Recommended):
+```bash
+python -m venv venv
+.\venv\Scripts\Activate.ps1  # Windows PowerShell
+# source venv/bin/activate   # Linux/Mac
+```
+
+3. **Install dependencies**:
 ```bash
 pip install -r requirements.txt
 ```
@@ -128,15 +135,28 @@ Options:
 
 #### 3. Launch Interactive Dashboard
 
+**Option A: Using PowerShell Script** (Recommended)
 ```bash
+.\run_dashboard.ps1
+```
+
+**Option B: Manual Launch**
+```bash
+.\venv\Scripts\Activate.ps1
+$env:PYTHONPATH = "$PWD"
 streamlit run frontend/dashboard.py
 ```
 
 The dashboard provides:
-- Real-time thermal visualization
-- Controller comparison
-- Parameter tuning
-- System monitoring
+- 🔬 **Digital Twin Simulation**: Real-time thermal heatmaps and control
+- 💻 **Real System Monitor**: Live laptop/system sensor readings
+- ⚖️ **Controller Comparison**: Side-by-side RL vs PID performance
+- 📊 **Interactive Visualization**: Dynamic charts and metrics
+- 🎛️ **Parameter Control**: Adjust simulation settings on-the-fly
+
+**Dashboard URL**: http://localhost:8501 (opens automatically)
+
+📖 **See [DASHBOARD_GUIDE.md](DASHBOARD_GUIDE.md) for detailed dashboard instructions**
 
 ---
 

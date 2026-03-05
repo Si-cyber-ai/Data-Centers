@@ -4,12 +4,12 @@
 simulation:
   grid_size: [3, 4]  # Rows x Columns of server racks
   timestep: 60  # seconds per simulation step
-  max_steps: 1000
+  max_steps: 500
   ambient_temperature: 25.0  # Celsius
   
   # Thermal dynamics coefficients
-  alpha: 0.15  # heat generation coefficient
-  beta: 0.20  # cooling efficiency
+  alpha: 0.12  # heat generation coefficient
+  beta: 0.30  # cooling efficiency
   gamma: 0.05  # heat diffusion from neighbors
   delta: 0.02  # ambient temperature effect
   noise_std: 0.1  # temperature noise standard deviation
@@ -21,6 +21,8 @@ safety:
   critical_temperature: 85.0  # Emergency shutdown threshold
   max_cooling_change: 0.3  # Maximum cooling change per step
   temperature_warning: 75.0  # Warning threshold
+  cooling_floor_temp: 70.0  # If avg temp > this, enforce min cooling
+  cooling_floor_level: 0.2  # Minimum cooling level when floor active
 
 # Reinforcement Learning
 rl:
@@ -36,6 +38,7 @@ rl:
   memory_size: 100000
   target_update_freq: 10
   training_episodes: 1000
+  entropy_weight: 0.01  # Action entropy encouragement
   
 # PID Controller
 pid:
@@ -47,8 +50,9 @@ pid:
 # Reward Function Weights
 reward:
   energy_weight: 1.0
-  temperature_violation_weight: 100.0
-  stability_weight: 10.0
+  temperature_excess_weight: 10.0
+  safety_violation_weight: 50.0
+  cooling_instability_weight: 0.5
   comfort_zone_temp: 65.0  # Optimal operating temperature
 
 # Workload Configuration

@@ -1,0 +1,132 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║          AI Data Center Cooling Optimization - Quick Reference              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  🚀 LAUNCH DASHBOARD                                                         │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  Method 1 (Easy):                                                            │
+│    .\run_dashboard.ps1                                                       │
+│                                                                              │
+│  Method 2 (Manual):                                                          │
+│    .\venv\Scripts\Activate.ps1                                               │
+│    $env:PYTHONPATH = "$PWD"                                                  │
+│    streamlit run frontend/dashboard.py                                       │
+│                                                                              │
+│  Access: http://localhost:8501                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  🎮 RUN SIMULATIONS                                                          │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  Train RL Agent:                                                             │
+│    python train_model.py --episodes 100                                      │
+│                                                                              │
+│  Run PID Simulation:                                                         │
+│    python run_simulation.py --controller pid --steps 300                     │
+│                                                                              │
+│  Run RL Simulation:                                                          │
+│    python run_simulation.py --controller rl --checkpoint checkpoints/        │
+│    dqn_final.pth --steps 300                                                 │
+│                                                                              │
+│  Compare Controllers:                                                        │
+│    python run_simulation.py --controller compare --checkpoint checkpoints/   │
+│    dqn_final.pth                                                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  🎛️ DASHBOARD MODES                                                          │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  🔬 Digital Twin Simulation                                                  │
+│     → Real-time thermal heatmaps                                             │
+│     → Step-by-step controller visualization                                  │
+│     → Choose RL or PID controller                                            │
+│                                                                              │
+│  💻 Real System Monitor                                                      │
+│     → Live CPU temperature                                                   │
+│     → CPU usage and fan speed                                                │
+│     → Historical trends                                                      │
+│                                                                              │
+│  ⚖️ Controller Comparison                                                    │
+│     → Side-by-side RL vs PID                                                 │
+│     → Synchronized execution                                                 │
+│     → Performance metrics comparison                                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  📊 KEY METRICS                                                              │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  Energy:                                                                     │
+│    • Average Cooling Level          • Peak Cooling                           │
+│    • Total Energy (kWh)             • Cooling Std Dev                        │
+│                                                                              │
+│  Temperature:                                                                │
+│    • Average Temperature (°C)       • Max Temperature                        │
+│    • Violations Count               • Comfort Zone Ratio                     │
+│                                                                              │
+│  Stability:                                                                  │
+│    • Temperature Change Rate        • Settling Time                          │
+│    • Cooling Change Rate            • System Oscillations                    │
+│                                                                              │
+│  Safety:                                                                     │
+│    • Hotspot Detection              • Violation Ratio                        │
+│    • Anomaly Alerts                 • Emergency Shutdowns                    │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  🔧 TROUBLESHOOTING                                                          │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  Dashboard won't start:                                                      │
+│    .\venv\Scripts\Activate.ps1                                               │
+│    pip install -r requirements.txt                                           │
+│                                                                              │
+│  Port 8501 in use:                                                           │
+│    netstat -ano | Select-String "8501"                                       │
+│    taskkill /PID <PID> /F                                                    │
+│                                                                              │
+│  Import errors:                                                              │
+│    $env:PYTHONPATH = "$PWD"                                                  │
+│                                                                              │
+│  Create new venv:                                                            │
+│    python -m venv venv                                                       │
+│    .\venv\Scripts\Activate.ps1                                               │
+│    pip install -r requirements.txt                                           │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  📁 IMPORTANT FILES                                                          │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  config.yaml              → Main configuration                               │
+│  requirements.txt         → Python dependencies                              │
+│  run_dashboard.ps1        → Dashboard launcher script                        │
+│  train_model.py           → RL training CLI                                  │
+│  run_simulation.py        → Simulation CLI                                   │
+│  README.md                → Full documentation                               │
+│  DASHBOARD_GUIDE.md       → Detailed dashboard guide                         │
+│  QUICKSTART.md            → 5-minute quick start                             │
+│                                                                              │
+│  checkpoints/             → Trained model checkpoints                        │
+│  logs/                    → Training logs and plots                          │
+│  plots/                   → Simulation visualizations                        │
+│  experiments/             → Comparison results                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  🎯 CURRENT STATUS                                                           │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  ✅ Virtual environment created and configured                               │
+│  ✅ All dependencies installed                                               │
+│  ✅ NumPy compatibility issues resolved                                      │
+│  ✅ Streamlit caching issues fixed                                           │
+│  ✅ Dashboard running on http://localhost:8501                               │
+│  ✅ RL agent trained (50 episodes completed)                                 │
+│  ✅ Comparison results available                                             │
+│  ✅ All CLI tools functional                                                 │
+│                                                                              │
+│  🚀 READY FOR USE!                                                           │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  💡 TIP: Bookmark http://localhost:8501 when dashboard is running            ║
+║  📖 For detailed instructions, see DASHBOARD_GUIDE.md                        ║
+╚══════════════════════════════════════════════════════════════════════════════╝

@@ -20,8 +20,8 @@ class HeatTransferModel:
     def __init__(
         self,
         grid_size: Tuple[int, int],
-        alpha: float = 0.15,  # Heat generation coefficient
-        beta: float = 0.20,   # Cooling efficiency
+        alpha: float = 0.12,  # Heat generation coefficient
+        beta: float = 0.30,   # Cooling efficiency
         gamma: float = 0.05,  # Heat diffusion coefficient
         delta: float = 0.02,  # Ambient effect coefficient
         noise_std: float = 0.1

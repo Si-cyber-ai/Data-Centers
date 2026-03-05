@@ -138,6 +138,7 @@ class DQNAgent:
         batch_size: int = 64,
         memory_size: int = 100000,
         target_update_freq: int = 10,
+        entropy_weight: float = 0.01,
         device: str = 'cpu'
     ):
         """
@@ -155,6 +156,7 @@ class DQNAgent:
             batch_size: Training batch size
             memory_size: Replay buffer capacity
             target_update_freq: Frequency to update target network
+            entropy_weight: Weight for action entropy bonus
             device: Device to run on ('cpu' or 'cuda')
         """
         self.state_dim = state_dim
@@ -165,6 +167,7 @@ class DQNAgent:
         self.epsilon_decay = epsilon_decay
         self.batch_size = batch_size
         self.target_update_freq = target_update_freq
+        self.entropy_weight = entropy_weight
         self.device = torch.device(device)
         
         # Q-network and target network
@@ -255,8 +258,15 @@ class DQNAgent:
             next_q_values = self.target_network(next_states).max(dim=1)[0]
             target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
         
-        # Compute loss
-        loss = nn.MSELoss()(current_q_values, target_q_values)
+        # Compute loss with entropy bonus to prevent policy collapse
+        td_loss = nn.MSELoss()(current_q_values, target_q_values)
+        
+        # Action entropy encouragement: encourage diverse action selection
+        q_all = self.q_network(states)
+        action_probs = torch.softmax(q_all, dim=1)
+        entropy = -(action_probs * (action_probs + 1e-8).log()).sum(dim=1).mean()
+        
+        loss = td_loss - self.entropy_weight * entropy
         
         # Optimize
         self.optimizer.zero_grad()
