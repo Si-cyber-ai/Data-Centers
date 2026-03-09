@@ -488,7 +488,7 @@ MIT License - see LICENSE file for details.
 
 For questions or collaboration:
 - Open an issue on GitHub
-- Email: your.email@example.com
+- Email: sidharthpnair20@example.com
 
 ---
 
