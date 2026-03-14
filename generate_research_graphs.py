@@ -104,7 +104,7 @@ def _run_simulation(config, use_rl=True, steps=300):
         cooling.append(float(np.mean(grids["cooling_levels"])))
         rewards.append(reward)
         violations.append(int(np.sum(grids["temperatures"] > 80.0)))
-        energies.append(float(np.mean(grids["cooling_levels"])))
+        energies.append(float(np.mean(np.square(grids["cooling_levels"]))))
         actions.append(action)
 
         if terminated:

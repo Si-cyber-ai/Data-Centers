@@ -66,7 +66,7 @@ for run in range(1, NUM_RUNS + 1):
         agent.post_step_safety(env)
 
         corrected = env.get_state_grid()
-        agent_energy += float(np.mean(corrected["cooling_levels"]))
+        agent_energy += float(np.mean(np.square(corrected["cooling_levels"])))
         temps.append(float(np.mean(corrected["temperatures"])))
         max_temps.append(float(np.max(corrected["temperatures"])))
         violations_list.append(int(np.sum(corrected["temperatures"] > 80.0)))
@@ -74,7 +74,7 @@ for run in range(1, NUM_RUNS + 1):
         # Baseline: constant cooling at 0.5 (naive data center approach)
         env_bl.cooling_levels = np.full((rows, cols), 0.5)
         state_bl, _, _, _, _ = env_bl.step(1)
-        baseline_energy += float(np.mean(env_bl.get_state_grid()["cooling_levels"]))
+        baseline_energy += float(np.mean(np.square(env_bl.get_state_grid()["cooling_levels"])))
 
         if terminated:
             break

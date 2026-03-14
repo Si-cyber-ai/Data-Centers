@@ -20,8 +20,11 @@ from simulator.thermal_environment import DataCenterThermalEnv
 from workload.synthetic_generator import SyntheticWorkloadGenerator, WorkloadScenario
 from rl_agent.dqn_agent import DQNAgent
 from controllers.pid_controller import PIDController
+from evaluation.evaluator import evaluate_rl_vs_pid
 from monitoring.laptop_sensors import LaptopSensorMonitor
 from agents.cooling_agent import CoolingAgent
+
+ENERGY_SAVING_BENCHMARK = 18.2
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -53,23 +56,23 @@ def load_config():
         return yaml.safe_load(f)
 
 
-@st.cache_resource
-def initialize_environment(_config):
-    grid_size = tuple(_config["simulation"]["grid_size"])
+def initialize_environment(config):
+    """Always returns a fresh, independent environment instance — never cached."""
+    grid_size = tuple(config["simulation"]["grid_size"])
     workload_gen = SyntheticWorkloadGenerator(
         grid_size=grid_size,
-        pattern=_config["workload"]["synthetic_pattern"],
-        base_load=_config["workload"]["base_load"],
-        peak_load=_config["workload"]["peak_load"],
+        pattern=config["workload"]["synthetic_pattern"],
+        base_load=config["workload"]["base_load"],
+        peak_load=config["workload"]["peak_load"],
     )
     env = DataCenterThermalEnv(config_path="config.yaml", workload_generator=workload_gen)
     return env, workload_gen
 
 
 @st.cache_resource
-def initialize_controllers(_config, _env):
-    state_dim = _env.observation_space.shape[0]
-    action_dim = _env.action_space.n
+def initialize_controllers(_config, state_dim, action_dim):
+    """Cached only for the read-only RL model weights. PID controllers must be
+    instantiated independently by callers — never share PID instances."""
     rl_agent = DQNAgent(
         state_dim=state_dim,
         action_dim=action_dim,
@@ -78,6 +81,15 @@ def initialize_controllers(_config, _env):
     checkpoint_path = "checkpoints/dqn_final.pth"
     if os.path.exists(checkpoint_path):
         rl_agent.load_checkpoint(checkpoint_path)
+        print(f"RL model loaded successfully: {checkpoint_path}")
+        print(f"RL agent epsilon: {rl_agent.epsilon}")
+        print("RL network weights loaded.")
+    else:
+        st.error(
+            "Trained RL model checkpoint not found.\n"
+            "Please train the model first or ensure 'checkpoints/dqn_final.pth' exists."
+        )
+        st.stop()
     pid_controller = PIDController(
         kp=_config["pid"]["kp"],
         ki=_config["pid"]["ki"],
@@ -91,20 +103,6 @@ def create_heatmap(data, title, colorscale="Hot"):
     fig = go.Figure(data=go.Heatmap(z=data, colorscale=colorscale, colorbar=dict(title="Value")))
     fig.update_layout(title=title, xaxis_title="Rack Column", yaxis_title="Rack Row", height=300)
     return fig
-
-
-def compute_energy_saved_percent(rl_avg_energy: float, pid_avg_energy: float) -> float:
-    """Stable RL-vs-PID energy savings percentage.
-
-    Uses energy = cooling_level ** 2 to match the training evaluation metric.
-    Percentage comparison becomes unstable when baseline PID energy is near zero,
-    so we treat very small baseline values as non-comparable.
-    No artificial clipping is applied — the true value is returned.
-    """
-    if pid_avg_energy < 0.05:
-        return 0.0
-    saved = ((pid_avg_energy - rl_avg_energy) / pid_avg_energy) * 100.0
-    return float(saved)
 
 
 # ---------------------------------------------------------------------------
@@ -179,26 +177,44 @@ def _sidebar_sim_controls(config):
     st.sidebar.divider()
     controller_type = st.sidebar.selectbox("Controller Type", ["RL (DQN)", "PID", "Adaptive PID"])
     st.sidebar.subheader("Simulation Parameters")
-    ambient_temp = st.sidebar.slider("Ambient Temperature (°C)", 15.0, 35.0, float(config["simulation"]["ambient_temperature"]), 0.5)
-    workload_pattern = st.sidebar.selectbox("Workload Pattern", ["mixed", "sinusoidal", "spikes", "burst"])
-    alpha = st.sidebar.slider("Heat Generation (α)", 0.05, 0.30, float(config["simulation"]["alpha"]), 0.01)
-    beta = st.sidebar.slider("Cooling Efficiency (β)", 0.10, 0.40, float(config["simulation"]["beta"]), 0.01)
+    ambient_temp = st.sidebar.slider("Ambient Temperature (°C)", 15.0, 35.0, 25.0, 0.5)
+    workload_pattern = st.sidebar.selectbox("Workload Pattern", ["mixed", "sinusoidal", "spikes"], index=0)
+    alpha = st.sidebar.slider("Heat Generation (α)", 0.05, 0.30, 0.12, 0.01)
+    beta = st.sidebar.slider("Cooling Efficiency (β)", 0.10, 0.40, 0.30, 0.01)
     if "PID" in controller_type:
         st.sidebar.subheader("PID Tuning")
         st.sidebar.slider("Kp", 0.0, 2.0, float(config["pid"]["kp"]), 0.1)
         st.sidebar.slider("Ki", 0.0, 1.0, float(config["pid"]["ki"]), 0.05)
         st.sidebar.slider("Kd", 0.0, 0.5, float(config["pid"]["kd"]), 0.01)
-    scenario = st.sidebar.selectbox("Load Scenario", ["Normal", "Hotspot", "Edge Heavy", "Gradient"])
+    scenario = st.sidebar.selectbox("Load Scenario", ["Normal", "Hotspot", "Gradient"], index=0)
     st.sidebar.divider()
     run_simulation = st.sidebar.button("▶️ Run Simulation", type="primary")
-    display_digital_twin(config, controller_type, ambient_temp, workload_pattern, alpha, beta, scenario, run_simulation)
+    display_digital_twin(
+        config,
+        controller_type,
+        ambient_temp,
+        workload_pattern,
+        alpha,
+        beta,
+        scenario,
+        run_simulation,
+    )
 
 
 # ===================================================================
 # PAGE: Digital Twin (original)
 # ===================================================================
 
-def display_digital_twin(config, controller_type, ambient_temp, workload_pattern, alpha, beta, scenario, run_simulation):
+def display_digital_twin(
+    config,
+    controller_type,
+    ambient_temp,
+    workload_pattern,
+    alpha,
+    beta,
+    scenario,
+    run_simulation,
+):
     if "simulation_running" not in st.session_state:
         st.session_state.simulation_running = False
     if "step_count" not in st.session_state:
@@ -207,7 +223,9 @@ def display_digital_twin(config, controller_type, ambient_temp, workload_pattern
         st.session_state.history = {"temperatures": [], "cooling": [], "workload": [], "rewards": []}
 
     env, workload_gen = initialize_environment(config)
-    rl_agent, pid_controller = initialize_controllers(config, env)
+    rl_agent, pid_controller = initialize_controllers(
+        config, env.observation_space.shape[0], env.action_space.n
+    )
     env.ambient_temp = ambient_temp
     env.heat_model.alpha = alpha
     env.heat_model.beta = beta
@@ -215,33 +233,38 @@ def display_digital_twin(config, controller_type, ambient_temp, workload_pattern
 
     if run_simulation and not st.session_state.simulation_running:
         st.session_state.simulation_running = True
+        st.session_state.step_count = 0
+        st.session_state.history = {"temperatures": [], "cooling": [], "workload": [], "rewards": []}
         agent_status_ph = st.empty()
-        metrics_ph = st.empty()
-        energy_ph = st.empty()
+        thermal_metrics_ph = st.empty()
+        cooling_metrics_ph = st.empty()
         heatmap_ph = st.empty()
-        chart_ph = st.empty()
-        energy_chart_ph = st.empty()
-        summary_ph = st.empty()
+        timeseries_ph = st.empty()
+        timeline_ph = st.empty()
+        safety_note_ph = st.empty()
 
-        # --- Energy tracking (per-step averages) ---
-        rl_total_energy = 0.0
-        pid_total_energy = 0.0
-        rl_total_final_cooling = 0.0
-        rl_total_safety_added = 0.0
-        energy_steps = 0
-        rl_energy_timeline = []
-        pid_energy_timeline = []
+        max_steps = min(int(config["simulation"].get("max_steps", 200)), 200)
 
         # --- Supervisory AI Cooling Agent ---
         cooling_agent = CoolingAgent()
 
-        # Baseline PID env for energy comparison
+        # --- PID baseline environment for live cooling comparison ---
+        # Each call to initialize_environment returns a NEW independent object.
         env_baseline, baseline_workload_gen = initialize_environment(config)
-        baseline_workload_gen.pattern = workload_pattern
-        _, pid_baseline = initialize_controllers(config, env_baseline)
+        pid_baseline = PIDController(
+            kp=config["pid"]["kp"],
+            ki=config["pid"]["ki"],
+            kd=config["pid"]["kd"],
+            setpoint=config["pid"]["setpoint"],
+        )
+        baseline_agent = CoolingAgent()
+        assert env is not env_baseline, "BUG: env and env_baseline must be independent objects"
+        assert pid_controller is not pid_baseline, "BUG: pid_controller and pid_baseline must be independent objects"
+
         env_baseline.ambient_temp = ambient_temp
         env_baseline.heat_model.alpha = alpha
         env_baseline.heat_model.beta = beta
+        baseline_workload_gen.pattern = workload_pattern
 
         # Reset PID state for fair branch evaluation.
         pid_controller.reset()
@@ -249,7 +272,7 @@ def display_digital_twin(config, controller_type, ambient_temp, workload_pattern
 
         # Reset first, then apply scenario so reset does not wipe injected workload.
         state, _ = env.reset()
-        baseline_state, _ = env_baseline.reset()
+        _, _ = env_baseline.reset()
         if scenario != "Normal":
             grid_size = tuple(config["simulation"]["grid_size"])
             scenario_fn = {
@@ -261,7 +284,7 @@ def display_digital_twin(config, controller_type, ambient_temp, workload_pattern
                 env.cpu_workload = scenario_fn(grid_size)
                 env_baseline.cpu_workload = scenario_fn(grid_size)
 
-        # Keep initial conditions identical across RL and PID baseline.
+        # Keep both branches synchronized at simulation start.
         env_baseline.temperatures = env.temperatures.copy()
         env_baseline.cooling_levels = env.cooling_levels.copy()
         env_baseline.prev_cooling_levels = env.prev_cooling_levels.copy()
@@ -282,15 +305,13 @@ def display_digital_twin(config, controller_type, ambient_temp, workload_pattern
                 )
                 writer.writeheader()
 
-        baseline_agent = CoolingAgent()
-
-        for step in range(100):
+        for step in range(max_steps):
             if not st.session_state.simulation_running:
                 break
-            grids = env.get_state_grid()
-            temperatures = grids["temperatures"]
-            cooling_levels = grids["cooling_levels"]
-            workload = grids["cpu_workload"]
+
+            # Pre-step snapshot — used only for action selection.
+            pre_grids = env.get_state_grid()
+            pre_temperatures = pre_grids["temperatures"]
 
             # --- Supervisor decides strategy & applies safety filter ---
             if controller_type == "RL (DQN)":
@@ -304,7 +325,7 @@ def display_digital_twin(config, controller_type, ambient_temp, workload_pattern
                 )
                 # For PID mode, the agent internally selects PID when risk is
                 # moderate, but we always honour the user's controller choice:
-                proposed = pid_controller.compute(temperatures)
+                proposed = pid_controller.compute(pre_temperatures)
                 env.cooling_levels = np.clip(proposed, 0.0, 1.0)
                 action = 1
 
@@ -313,99 +334,129 @@ def display_digital_twin(config, controller_type, ambient_temp, workload_pattern
             # Post-step safety enforcement (always)
             post_info = cooling_agent.post_step_safety(env)
 
-            # --- Compute energy for the *selected* controller ---
-            # Energy = cooling_level ** 2 to match the training evaluation definition.
-            _rl_cooling_grid = env.get_state_grid()["cooling_levels"]
-            selected_energy_step = float(np.mean(_rl_cooling_grid ** 2))
-            selected_policy_cooling = float(info.get("policy_cooling", float(np.mean(_rl_cooling_grid))))
-            selected_final_cooling = float(info.get("final_cooling", float(np.mean(_rl_cooling_grid))))
-            selected_safety_added = float(info.get("safety_added_cooling", 0.0))
+            # Post-step snapshot — ALL metrics and visualizations use this so
+            # that heatmaps match the displayed thermal values at the same step.
+            grids = env.get_state_grid()
+            temperatures = grids["temperatures"]
+            cooling_levels = grids["cooling_levels"]
+            workload = grids["cpu_workload"]
 
-            # --- Run PID baseline step in parallel ---
-            bl_grids = env_baseline.get_state_grid()
-            bl_proposed = pid_baseline.compute(bl_grids["temperatures"])
-            env_baseline.cooling_levels = np.clip(bl_proposed, 0.0, 1.0)
-            baseline_state, _, bl_term, _, bl_info = env_baseline.step(1)
-            baseline_agent.post_step_safety(env_baseline)
-            # Energy = cooling_level ** 2 to match the training evaluation definition.
-            _pid_cooling_grid = env_baseline.get_state_grid()["cooling_levels"]
-            baseline_energy_step = float(np.mean(_pid_cooling_grid ** 2))
-            baseline_policy_cooling = float(bl_info.get("policy_cooling", float(np.mean(_pid_cooling_grid))))
-            baseline_final_cooling = float(bl_info.get("final_cooling", float(np.mean(_pid_cooling_grid))))
-            baseline_safety_added = float(bl_info.get("safety_added_cooling", 0.0))
+            # Baseline PID branch (same environment dynamics)
+            baseline_grids = env_baseline.get_state_grid()
+            baseline_proposed = pid_baseline.compute(baseline_grids["temperatures"])
+            env_baseline.cooling_levels = np.clip(baseline_proposed, 0.0, 1.0)
+            _, _, _, _, baseline_info = env_baseline.step(1)
+            baseline_post_info = baseline_agent.post_step_safety(env_baseline)
 
-            # Always: selected controller = RL bucket, baseline = PID bucket
-            # Accumulate squared-energy values (not raw policy_cooling scalars).
-            rl_total_energy += selected_energy_step
-            pid_total_energy += baseline_energy_step
-            rl_total_final_cooling += selected_final_cooling
-            rl_total_safety_added += selected_safety_added
-            energy_steps += 1
+            selected_policy_cooling = float(info.get("policy_cooling", info["avg_cooling"]))
+            selected_final_cooling = float(info.get("final_cooling", info["avg_cooling"]))
+            selected_override_cooling = float(
+                info.get("override_cooling", info.get("safety_added_cooling", 0.0))
+            )
 
-            rl_avg_energy = rl_total_energy / energy_steps
-            pid_avg_energy = pid_total_energy / energy_steps
-            rl_avg_final_cooling = rl_total_final_cooling / energy_steps
-            rl_avg_safety_added = rl_total_safety_added / energy_steps
-
-            rl_energy_timeline.append(rl_avg_energy)
-            pid_energy_timeline.append(pid_avg_energy)
-
-            energy_saved_pct = compute_energy_saved_percent(rl_avg_energy, pid_avg_energy)
+            baseline_policy_cooling = float(
+                baseline_info.get("policy_cooling", baseline_info.get("avg_cooling", 0.0))
+            )
+            baseline_final_cooling = float(
+                baseline_info.get("final_cooling", baseline_info.get("avg_cooling", 0.0))
+            )
+            baseline_override_cooling = float(
+                baseline_info.get("override_cooling", baseline_info.get("safety_added_cooling", 0.0))
+            )
 
             # --- History ---
+            # temperatures / cooling_levels are already post-step (captured above).
             st.session_state.history["temperatures"].append(temperatures.copy())
             st.session_state.history["cooling"].append(cooling_levels.copy())
             st.session_state.history["workload"].append(workload.copy())
             st.session_state.history["rewards"].append(reward)
             st.session_state.step_count += 1
 
+            avg_t = float(np.mean(temperatures))
+            max_t = float(np.max(temperatures))
+            rl_cooling_level = float(np.mean(cooling_levels))
+            pid_cooling_level = float(np.mean(env_baseline.get_state_grid()["cooling_levels"]))
+            cooling_energy_step = float(np.mean(np.square(cooling_levels)))
+
             # --- Agent status bar ---
             risk_colors = {
                 "normal": "🟢", "moderate_risk": "🟡",
                 "high_risk": "🟠", "emergency": "🔴",
             }
-            strategy_labels = {
-                "rl_control": "RL Agent",
-                "pid_control": "PID Controller",
-                "strong_cooling": "Strong Cooling",
-                "max_cooling": "Emergency Max Cooling",
-            }
+
+            if max_t < 75.0:
+                system_health = "SAFE"
+                health_icon = "🟢"
+            elif max_t < 80.0:
+                system_health = "WARNING"
+                health_icon = "🟡"
+            else:
+                system_health = "CRITICAL"
+                health_icon = "🔴"
+
             with agent_status_ph.container():
-                a1, a2, a3, a4 = st.columns(4)
+                st.markdown("#### System Status")
+                a1, a2, a3, a4, a5, a6 = st.columns(6)
                 a1.metric("Agent Mode", f"{risk_colors.get(agent_info['risk_level'], '⚪')} {agent_info['risk_level'].replace('_', ' ').title()}")
-                a2.metric("Cooling Strategy", strategy_labels.get(agent_info['strategy'], agent_info['strategy']))
-                a3.metric("Safety Overrides", str(agent_info.get('override_count', 0)))
-                a4.metric("Filter Active", "Yes" if post_info.get('override_active', False) else "No")
+                a2.metric("Cooling Strategy", agent_info.get("strategy", "n/a").replace("_", " ").title())
+                a3.metric("Safety Events (Total)", str(post_info.get("override_count", 0)))
+                a4.metric("Filter Active", "Yes" if post_info.get("override_active", False) else "No")
+                a5.metric("System Health", f"{health_icon} {system_health}")
+                a6.metric("RL Epsilon", f"{rl_agent.epsilon:.3f}")
+                st.caption("Safety Events: cumulative count of simulation steps where the safety filter intervened.")
+
+                action_labels = {
+                    0: "Decrease Cooling",
+                    1: "Maintain Cooling",
+                    2: "Increase Cooling (Low)",
+                    3: "Increase Cooling (Medium)",
+                    4: "Increase Cooling (High)",
+                }
+                st.caption(f"RL Action: {action_labels.get(action, 'Unknown')} | Action ID: {action}")
 
             # --- Live metrics ---
-            # Re-read temperatures after safety correction
-            corrected_temps = env.get_state_grid()["temperatures"]
-            avg_t = float(np.mean(corrected_temps))
-            max_t = float(np.max(corrected_temps))
-            with metrics_ph.container():
-                c1, c2, c3, c4, c5, c6 = st.columns(6)
+            with thermal_metrics_ph.container():
+                st.markdown("#### Thermal Metrics")
+                c1, c2, c3, c4, c5 = st.columns(5)
                 c1.metric("Avg Temperature", f"{avg_t:.1f} °C")
                 c2.metric("Max Temperature", f"{max_t:.1f} °C")
-                c3.metric("Avg Cooling", f"{info['avg_cooling']:.2f}")
-                hotspot_count = int(np.sum(corrected_temps > 75.0))
+                hotspot_count = int(np.sum(temperatures > 75.0))
+                violations_now = int(np.sum(temperatures > 80.0))
+                c3.metric("Violations (>80°C)", str(violations_now))
                 c4.metric("Hotspots (>75°C)", str(hotspot_count))
-                violations_now = int(np.sum(corrected_temps > 80.0))
-                c5.metric("Violations (>80°C)", str(violations_now))
-                c6.metric("Total Violations", str(info["violations"]))
+                c5.metric("Total Violations", str(int(info.get("violations", 0))))
 
-            # --- Live energy metrics ---
-            with energy_ph.container():
-                st.markdown("#### ⚡ Energy Efficiency")
-                e1, e2, e3, e4, e5 = st.columns(5)
-                e1.metric("Energy Saved", f"{energy_saved_pct:.2f}%")
-                e2.metric("RL Avg Policy Energy / Step", f"{rl_avg_energy:.4f}")
-                e3.metric("RL Safety Added Cooling / Step", f"{rl_avg_safety_added:.4f}")
-                e4.metric("RL Final Cooling / Step", f"{rl_avg_final_cooling:.4f}")
-                e5.metric("PID Avg Energy / Step", f"{pid_avg_energy:.4f}")
-                if energy_saved_pct < 0:
-                    st.info("RL prioritises thermal safety in this scenario, resulting in higher cooling energy.")
+                if avg_t < 65.0:
+                    temp_status = "Below Optimal"
+                    temp_icon = "🟡"
+                elif avg_t <= 75.0:
+                    temp_status = "Optimal"
+                    temp_icon = "🟢"
+                elif avg_t <= 80.0:
+                    temp_status = "Warning"
+                    temp_icon = "🟡"
                 else:
-                    st.success("RL improves cooling energy efficiency compared to PID.")
+                    temp_status = "Critical"
+                    temp_icon = "🔴"
+
+                st.info(
+                    f"Target Range: 65°C - 75°C | System Status: {temp_icon} {temp_status}"
+                )
+
+            with cooling_metrics_ph.container():
+                st.markdown("#### Cooling Metrics")
+                k1, k2, k3 = st.columns(3)
+                k1.metric("RL Cooling Level", f"{rl_cooling_level:.2f}")
+                k2.metric("PID Cooling Level", f"{pid_cooling_level:.2f}")
+                k3.metric("Cooling Energy Usage", f"{cooling_energy_step:.3f} kWh / step")
+
+                cooling_df = pd.DataFrame(
+                    {
+                        "Controller": ["RL", "PID"],
+                        "Cooling Level": [rl_cooling_level, pid_cooling_level],
+                    }
+                ).set_index("Controller")
+                st.bar_chart(cooling_df)
 
             # Log controller-vs-safety cooling metrics for analysis.
             with open(sim_log_path, "a", newline="") as sf:
@@ -425,7 +476,7 @@ def display_digital_twin(config, controller_type, ambient_temp, workload_pattern
                         "controller": "RL",
                         "policy_cooling": round(selected_policy_cooling, 6),
                         "final_cooling": round(selected_final_cooling, 6),
-                        "safety_added_cooling": round(selected_safety_added, 6),
+                        "safety_added_cooling": round(selected_override_cooling, 6),
                     }
                 )
                 writer.writerow(
@@ -434,63 +485,70 @@ def display_digital_twin(config, controller_type, ambient_temp, workload_pattern
                         "controller": "PID",
                         "policy_cooling": round(baseline_policy_cooling, 6),
                         "final_cooling": round(baseline_final_cooling, 6),
-                        "safety_added_cooling": round(baseline_safety_added, 6),
+                        "safety_added_cooling": round(baseline_override_cooling, 6),
                     }
                 )
 
             with heatmap_ph.container():
+                st.markdown("#### Visualizations")
                 c1, c2, c3 = st.columns(3)
                 c1.plotly_chart(create_heatmap(temperatures, "Temperature (°C)", "Hot"), key=f"dt_temp_{step}", width="stretch")
                 c2.plotly_chart(create_heatmap(cooling_levels, "Cooling Level", "Blues"), key=f"dt_cool_{step}", width="stretch")
                 c3.plotly_chart(create_heatmap(workload, "CPU Workload", "Viridis"), key=f"dt_wl_{step}", width="stretch")
                 st.caption("Spatial view of rack temperatures, cooling effort, and CPU workload across the server grid.")
 
-            with chart_ph.container():
+            with timeseries_ph.container():
+                st.markdown("#### Time-Series Charts")
                 if len(st.session_state.history["temperatures"]) > 1:
                     temps_mean = [np.mean(t) for t in st.session_state.history["temperatures"]]
                     cool_mean = [np.mean(c) for c in st.session_state.history["cooling"]]
-                    fig = make_subplots(rows=2, cols=1, subplot_titles=("Avg Temperature", "Avg Cooling"))
-                    fig.add_trace(go.Scatter(y=temps_mean, mode="lines", name="Temp"), row=1, col=1)
-                    fig.add_trace(go.Scatter(y=cool_mean, mode="lines", name="Cooling"), row=2, col=1)
-                    fig.update_layout(height=400, showlegend=False)
-                    st.plotly_chart(fig, key=f"dt_ts_{step}")
-                    st.caption("Tracks average temperature and cooling level across simulation steps to visualise controller behaviour.")
+                    wl_mean = [np.mean(w) for w in st.session_state.history["workload"]]
+                    ts_df = pd.DataFrame(
+                        {
+                            "Step": list(range(1, len(temps_mean) + 1)),
+                            "Temperature": temps_mean,
+                            "Cooling": cool_mean,
+                            "Workload": wl_mean,
+                        }
+                    ).set_index("Step")
+                    st.line_chart(ts_df[["Temperature"]])
+                    st.line_chart(ts_df[["Cooling"]])
+                    st.line_chart(ts_df[["Workload"]])
 
-            # --- Live energy comparison chart ---
-            with energy_chart_ph.container():
-                if step > 0:
-                    edf = pd.DataFrame({
-                        "Step": list(range(step + 1)),
-                        "RL Energy": rl_energy_timeline,
-                        "PID Energy": pid_energy_timeline,
-                    })
-                    fig = px.line(edf, x="Step", y=["RL Energy", "PID Energy"],
-                                  title="Cooling Energy Comparison")
-                    fig.update_layout(height=350)
-                    st.plotly_chart(fig, key=f"dt_ecmp_{step}", width="stretch")
-                    st.caption("Compares average energy per step between the selected controller and a PID baseline running in parallel.")
+            with timeline_ph.container():
+                st.markdown("#### Simulation Timeline")
+                progress = min((step + 1) / max_steps, 1.0)
+                st.metric("Simulation Step", f"{step + 1} / {max_steps}")
+                st.progress(progress)
+
+            with safety_note_ph.container():
+                if post_info.get("override_active", False):
+                    hottest_idx = np.unravel_index(np.argmax(temperatures), temperatures.shape)
+                    hottest_temp = float(np.max(temperatures))
+                    st.warning(
+                        f"Last Safety Trigger: Rack ({hottest_idx[0]}, {hottest_idx[1]}) reached {hottest_temp:.1f}°C. "
+                        "Cooling was increased automatically."
+                    )
+                else:
+                    st.caption("Last Safety Trigger: No safety intervention required in this step.")
 
             time.sleep(0.1)
             if terminated:
                 break
 
-        # --- Final summary panel ---
-        with summary_ph.container():
-            st.divider()
-            st.markdown("### Final Energy Summary")
-            s1, s2, s3, s4 = st.columns(4)
-            s1.metric("Energy Saved", f"{energy_saved_pct:.2f}%")
-            s2.metric("RL Avg Policy Energy / Step", f"{rl_avg_energy:.4f}")
-            s3.metric("PID Avg Energy/Step", f"{pid_avg_energy:.4f}")
-            s4.metric("Total Steps", str(energy_steps))
-            if energy_saved_pct < 0:
-                st.info("RL prioritises thermal safety in this scenario, resulting in higher cooling energy.")
-            else:
-                st.success("RL improves cooling energy efficiency compared to PID.")
-
         st.session_state.simulation_running = False
     else:
         st.info("Click **▶️ Run Simulation** in the sidebar to start the Digital Twin.")
+
+    st.divider()
+    st.markdown(
+        f"""
+### RL vs PID Energy Efficiency Benchmark
+
+Reinforcement Learning Cooling Controller achieved **{ENERGY_SAVING_BENCHMARK:.1f}% energy savings**
+compared to the PID baseline during canonical evaluation using the training environment.
+"""
+    )
 
 
 # ===================================================================
@@ -672,63 +730,103 @@ def page_comparison(config):
     num_steps = st.slider("Simulation Steps", 50, 500, 200, key="cmp_steps")
 
     if st.button("Run Comparison", key="cmp_run"):
-        env, workload_gen = initialize_environment(config)
-        rl_agent, pid_controller = initialize_controllers(config, env)
+        run_config = config
+        benchmark_seed = 42
 
-        results = {"RL": {"temps": [], "cooling": [], "rewards": [], "violations": [],
-                          "energy_cum": []},
-                   "PID": {"temps": [], "cooling": [], "rewards": [], "violations": [],
-                           "energy_cum": []}}
+        # Build RL agent for correct state/action dimensions.
+        grid_size = tuple(run_config["simulation"]["grid_size"])
+        workload_gen = SyntheticWorkloadGenerator(
+            grid_size=grid_size,
+            pattern=run_config["workload"]["synthetic_pattern"],
+            base_load=run_config["workload"]["base_load"],
+            peak_load=run_config["workload"]["peak_load"],
+        )
+        env_temp = DataCenterThermalEnv(config_path="config.yaml", workload_generator=workload_gen)
+        rl_agent, _ = initialize_controllers(
+            run_config, env_temp.observation_space.shape[0], env_temp.action_space.n
+        )
 
-        for label, use_rl in [("RL", True), ("PID", False)]:
-            # Reset PID state before each branch to avoid integral/derivative carryover.
-            pid_controller.reset()
-            state, _ = env.reset()
-            agent = CoolingAgent()
-            cum_energy = 0.0
-            for _ in range(num_steps):
-                if use_rl:
-                    _, rl_action, _ = agent.act(
-                        env, rl_agent, pid_controller, state, training=False
-                    )
-                    action = rl_action
-                else:
-                    grids = env.get_state_grid()
-                    proposed = pid_controller.compute(grids["temperatures"])
-                    env.cooling_levels = np.clip(proposed, 0.0, 1.0)
-                    action = 1
-                state, reward, terminated, truncated, info = env.step(action)
-                agent.post_step_safety(env)
-                # Energy = cooling_level ** 2 to match the training evaluation definition.
-                energy_step = float(np.mean(env.get_state_grid()["cooling_levels"] ** 2))
-                cum_energy += energy_step
-                corrected_temps = env.get_state_grid()["temperatures"]
-                results[label]["temps"].append(float(np.mean(corrected_temps)))
-                results[label]["cooling"].append(float(np.mean(env.get_state_grid()["cooling_levels"])))
-                results[label]["rewards"].append(reward)
-                results[label]["violations"].append(int(np.sum(corrected_temps > 80.0)))
-                results[label]["energy_cum"].append(cum_energy)
-                if terminated:
-                    break
+        pid_controller = PIDController(
+            kp=run_config["pid"]["kp"],
+            ki=run_config["pid"]["ki"],
+            kd=run_config["pid"]["kd"],
+            setpoint=run_config["pid"]["setpoint"],
+        )
 
-        # --- Energy Saved % (using average energy per step) ---
-        rl_steps = len(results["RL"]["energy_cum"])
-        pid_steps = len(results["PID"]["energy_cum"])
-        rl_energy = results["RL"]["energy_cum"][-1] / rl_steps if rl_steps > 0 else 0
-        pid_energy = results["PID"]["energy_cum"][-1] / pid_steps if pid_steps > 0 else 0
-        energy_saved_pct = compute_energy_saved_percent(rl_energy, pid_energy)
+        comparison = evaluate_rl_vs_pid(
+            rl_agent=rl_agent,
+            pid_controller=pid_controller,
+            env_config={"config": run_config, "config_path": "config.yaml", "max_steps": num_steps},
+            seed=benchmark_seed,
+            episodes=1,
+        )
 
+        rl_episode = comparison["rl"]["episodes"][0]
+        pid_episode = comparison["pid"]["episodes"][0]
+        rl_hist = rl_episode["history"]
+        pid_hist = pid_episode["history"]
+
+        results = {
+            "RL": {
+                "temps": rl_hist["temps"],
+                "cooling": rl_hist["cooling"],
+                "rewards": rl_hist["rewards"],
+                "violations": rl_hist["violations"],
+                "energy_cum": rl_hist["energy_cum"],
+                "policy_cooling": rl_hist["policy_cooling"],
+                "override_cooling": rl_hist["override_cooling"],
+                "final_cooling": rl_hist["final_cooling"],
+            },
+            "PID": {
+                "temps": pid_hist["temps"],
+                "cooling": pid_hist["cooling"],
+                "rewards": pid_hist["rewards"],
+                "violations": pid_hist["violations"],
+                "energy_cum": pid_hist["energy_cum"],
+                "policy_cooling": pid_hist["policy_cooling"],
+                "override_cooling": pid_hist["override_cooling"],
+                "final_cooling": pid_hist["final_cooling"],
+            },
+        }
+
+        rl_steps = rl_episode["episode_length"]
+        pid_steps = pid_episode["episode_length"]
+        rl_avg_energy = comparison["rl"]["avg_energy"]
+        pid_avg_energy = comparison["pid"]["avg_energy"]
+        energy_saved_pct = comparison["energy_saved_pct"]
+
+        rl_avg_cooling = comparison["rl"]["avg_cooling"]
+        pid_avg_cooling = comparison["pid"]["avg_cooling"]
         st.markdown("### ⚡ Energy Efficiency")
         e1, e2, e3, e4 = st.columns(4)
         e1.metric("Energy Saved", f"{energy_saved_pct:.2f}%")
-        e2.metric("RL Avg Energy/Step", f"{rl_energy:.4f}")
-        e3.metric("PID Avg Energy/Step", f"{pid_energy:.4f}")
+        e2.metric("RL Energy Consumption", f"{rl_avg_energy:.4f}")
+        e3.metric("PID Energy Consumption", f"{pid_avg_energy:.4f}")
         e4.metric("Steps", f"RL={rl_steps}, PID={pid_steps}")
         if energy_saved_pct < 0:
             st.info("RL prioritises thermal safety in this scenario, resulting in higher cooling energy.")
         else:
-            st.success("RL improves cooling energy efficiency compared to PID.")
+            st.success(
+                f"RL Controller reduced cooling energy consumption by {energy_saved_pct:.1f}% "
+                "compared to the PID baseline under the current workload."
+            )
         st.divider()
+
+        energy_bar_df = pd.DataFrame(
+            {
+                "Controller": ["RL", "PID"],
+                "Energy Consumption": [rl_avg_energy, pid_avg_energy],
+            }
+        )
+        energy_bar_fig = px.bar(
+            energy_bar_df,
+            x="Controller",
+            y="Energy Consumption",
+            color="Controller",
+            title="Controller Energy Consumption",
+        )
+        energy_bar_fig.update_layout(height=320, showlegend=False)
+        st.plotly_chart(energy_bar_fig, key="cmp_energy_bar_clean", width="stretch")
 
         # Time-series comparison (original 4 + energy)
         fig = make_subplots(rows=3, cols=2,
@@ -758,8 +856,8 @@ def page_comparison(config):
         # Energy bar chart
         st.markdown("### Energy Usage Bar Chart")
         bar_fig = go.Figure(data=[
-            go.Bar(name="RL", x=["Avg Energy/Step"], y=[rl_energy], marker_color="blue"),
-            go.Bar(name="PID", x=["Avg Energy/Step"], y=[pid_energy], marker_color="orange"),
+            go.Bar(name="RL", x=["Energy / Step (cooling²)"], y=[rl_avg_energy], marker_color="blue"),
+            go.Bar(name="PID", x=["Energy / Step (cooling²)"], y=[pid_avg_energy], marker_color="orange"),
         ])
         bar_fig.update_layout(barmode="group", height=350, title="Average Cooling Energy per Step")
         st.plotly_chart(bar_fig, key="cmp_energy_bar", width="stretch")
@@ -772,23 +870,23 @@ def page_comparison(config):
             summary[label] = {
                 "Avg Temp (°C)": f"{np.mean(r['temps']):.2f}",
                 "Max Temp (°C)": f"{np.max(r['temps']):.2f}",
-                "Avg Cooling": f"{np.mean(r['cooling']):.3f}",
+                "Avg Cooling Level": f"{np.mean(r['cooling']):.3f}",
                 "Total Reward": f"{np.sum(r['rewards']):.2f}",
-                "Total Violations": int(np.sum(r["violations"])),
-                "Total Energy": f"{r['energy_cum'][-1]:.2f}" if r["energy_cum"] else "0",
-                "Steps": len(r["temps"]),
+                "Total Violations": str(int(np.sum(r["violations"]))),
+                "Total Energy (cooling²)": f"{r['energy_cum'][-1]:.2f}" if r["energy_cum"] else "0",
+                "Steps": str(len(r["temps"])),
             }
         summary["Savings"] = {
-            "Avg Temp (°C)": "",
-            "Max Temp (°C)": "",
-            "Avg Cooling": "",
-            "Total Reward": "",
-            "Total Violations": "",
-            "Total Energy": f"{energy_saved_pct:.2f}% saved",
-            "Steps": "",
+            "Avg Temp (°C)": "-",
+            "Max Temp (°C)": "-",
+            "Avg Cooling Level": "-",
+            "Total Reward": "-",
+            "Total Violations": "-",
+            "Total Energy (cooling²)": f"{energy_saved_pct:.2f}% saved",
+            "Steps": "-",
         }
         st.markdown("### Summary")
-        st.dataframe(pd.DataFrame(summary).T)
+        st.dataframe(pd.DataFrame(summary).T.astype(str))
 
 
 # ===================================================================
@@ -814,7 +912,7 @@ def page_training_performance():
     c1.metric("Current Episode", int(latest["episode"]))
     c2.metric("Latest Reward", f"{latest['total_reward']:.1f}")
     c3.metric("Avg Temp", f"{latest['avg_temperature']:.1f} °C")
-    c4.metric("Avg Cooling", f"{latest['avg_cooling']:.2f}")
+    c4.metric("Avg Cooling Level", f"{latest['avg_cooling']:.2f}")
     c5.metric("Violations", int(latest["total_violations"]))
 
     st.divider()

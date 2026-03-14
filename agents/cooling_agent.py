@@ -33,10 +33,18 @@ class CoolingAgent:
     """
 
     # Escalation thresholds
-    NORMAL_CEILING = 65.0
-    MODERATE_CEILING = 70.0
-    HIGH_CEILING = 75.0
-    EMERGENCY_CEILING = 80.0
+    # NORMAL_CEILING raised to 75°C: RL acts freely through the entire typical
+    # 65–75°C operating band.  System runs at 66–69°C avg, so virtually no
+    # PID takeover occurs during training — the agent receives clean reward
+    # signal for all of its own decisions and can learn energy-efficient control
+    # without supervisor interference.
+    # Modern server CPUs are rated to 80°C; aggressive intervention at 72°C
+    # was eliminating RL's control authority during the most common operating
+    # conditions, corrupting the training signal.
+    NORMAL_CEILING   = 75.0    # was 72.0 (prev 65.0) — RL free below this
+    MODERATE_CEILING = 78.0    # was 75.0 (prev 70.0) — PID assists 75–78°C
+    HIGH_CEILING     = 80.0    # was 78.0 — strong cooling between 78–80°C
+    EMERGENCY_CEILING = 80.0   # unchanged — max cooling above 80°C
 
     def __init__(self):
         self.safety_filter = SafetyFilter()

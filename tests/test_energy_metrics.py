@@ -79,7 +79,7 @@ def _run_controller(config, *, use_rl: bool, num_steps: int = 300):
         agent.post_step_safety(env)
 
         corrected = env.get_state_grid()
-        energy_step = float(np.mean(corrected["cooling_levels"]))
+        energy_step = float(np.mean(corrected["cooling_levels"] ** 2))
         total_energy += energy_step
         cooling_history.append(corrected["cooling_levels"].copy())
 

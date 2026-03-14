@@ -206,7 +206,7 @@ class TrainingPipeline:
                 avg_temperature=info['avg_temperature'],
                 max_temperature=info['max_temperature'],
                 cooling_level=info['avg_cooling'],
-                energy_consumption=info['avg_cooling'],
+                energy_consumption=info['avg_cooling'] ** 2,
                 violations=info['hotspots'],
                 epsilon=self.agent.epsilon,
                 loss=loss,
@@ -226,6 +226,12 @@ class TrainingPipeline:
         }
         
         self.agent.episodes_done += 1
+
+        # Epsilon decay once per episode (not per step)
+        self.agent.epsilon = max(
+            self.agent.epsilon * self.config['rl']['epsilon_decay'],
+            self.config['rl']['epsilon_end']
+        )
         
         return episode_reward, episode_info
     

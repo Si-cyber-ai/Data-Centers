@@ -24,6 +24,7 @@ from rl_agent.training_pipeline import TrainingPipeline
 from simulator.thermal_environment import DataCenterThermalEnv
 from controllers.pid_controller import PIDController
 from workload.synthetic_generator import SyntheticWorkloadGenerator
+from evaluation.evaluator import evaluate_rl_vs_pid
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +188,7 @@ def _run_pid_episode(config: dict, num_steps: int = 500) -> dict:
     state, _ = env.reset()
     pid.reset()
 
-    temps, coolings, violations = [], [], []
+    temps, coolings, violations, energies = [], [], [], []
 
     for _ in range(num_steps):
         state_grids = env.get_state_grid()
@@ -195,9 +196,12 @@ def _run_pid_episode(config: dict, num_steps: int = 500) -> dict:
         proposed = pid.compute(temperatures)
         env.cooling_levels = np.clip(proposed, 0.0, 1.0)
         state, _reward, terminated, truncated, info = env.step(1)  # action 1 = maintain
+        state_grids = env.get_state_grid()
+        step_energy = float(np.mean(np.square(state_grids["cooling_levels"])))
 
         temps.append(info["avg_temperature"])
         coolings.append(info["avg_cooling"])
+        energies.append(step_energy)
         violations.append(info["hotspots"])
 
         if terminated or truncated:
@@ -208,7 +212,7 @@ def _run_pid_episode(config: dict, num_steps: int = 500) -> dict:
         "max_temp": float(np.max([info["max_temperature"] if "max_temperature" in info else t
                                    for t in temps])),
         "avg_cooling": float(np.mean(coolings)),
-        "avg_energy": float(np.mean([c ** 2 for c in coolings])),
+        "avg_energy": float(np.mean(energies)) if energies else 0.0,
         "violations": int(np.sum(violations)),
     }
 
@@ -220,15 +224,18 @@ def _run_rl_episode(pipeline: "TrainingPipeline", config: dict, num_steps: int =
     env = pipeline.env
     state, _ = env.reset()
 
-    temps, coolings, max_temps, violations = [], [], [], []
+    temps, coolings, max_temps, violations, energies = [], [], [], [], []
 
     for _ in range(num_steps):
         action = pipeline.agent.select_action(state, training=False)
         state, _reward, terminated, truncated, info = env.step(action)
+        state_grids = env.get_state_grid()
+        step_energy = float(np.mean(np.square(state_grids["cooling_levels"])))
 
         temps.append(info["avg_temperature"])
         max_temps.append(info["max_temperature"])
         coolings.append(info["avg_cooling"])
+        energies.append(step_energy)
         violations.append(info["hotspots"])
 
         if terminated or truncated:
@@ -238,12 +245,17 @@ def _run_rl_episode(pipeline: "TrainingPipeline", config: dict, num_steps: int =
         "avg_temp": float(np.mean(temps)),
         "max_temp": float(np.max(max_temps)) if max_temps else 0.0,
         "avg_cooling": float(np.mean(coolings)),
-        "avg_energy": float(np.mean([c ** 2 for c in coolings])),
+        "avg_energy": float(np.mean(energies)) if energies else 0.0,
         "violations": int(np.sum(violations)),
     }
 
 
-def _final_evaluation(pipeline: "TrainingPipeline", config: dict, num_eval_eps: int = 5):
+def _final_evaluation(
+    pipeline: "TrainingPipeline",
+    config: dict,
+    num_eval_eps: int = 5,
+    config_path: str = "config.yaml",
+):
     """
     Evaluate the trained RL agent and a PID baseline under identical conditions.
 
@@ -259,38 +271,40 @@ def _final_evaluation(pipeline: "TrainingPipeline", config: dict, num_eval_eps: 
     print("FINAL EVALUATION: RL vs PID")
     print("=" * 70)
 
-    rl_metrics_list = []
-    pid_metrics_list = []
+    print(f"Running {num_eval_eps} canonical evaluation episodes for each controller...")
 
-    print(f"Running {num_eval_eps} evaluation episodes for each controller...")
-    for ep in range(num_eval_eps):
-        print(f"  Episode {ep + 1}/{num_eval_eps}", end="\r")
-        rl_m = _run_rl_episode(pipeline, config)
-        pid_m = _run_pid_episode(config)
-        rl_metrics_list.append(rl_m)
-        pid_metrics_list.append(pid_m)
+    pid_controller = PIDController(
+        kp=config["pid"]["kp"],
+        ki=config["pid"]["ki"],
+        kd=config["pid"]["kd"],
+        setpoint=config["pid"]["setpoint"],
+    )
 
-    def _mean(lst, key):
-        return float(np.mean([d[key] for d in lst]))
+    comparison = evaluate_rl_vs_pid(
+        rl_agent=pipeline.agent,
+        pid_controller=pid_controller,
+        env_config={
+            "config": config,
+            "config_path": config_path,
+            "max_steps": config["simulation"]["max_steps"],
+        },
+        seed=42,
+        episodes=num_eval_eps,
+    )
 
-    rl_avg_temp   = _mean(rl_metrics_list, "avg_temp")
-    rl_max_temp   = max(d["max_temp"] for d in rl_metrics_list)
-    rl_avg_cool   = _mean(rl_metrics_list, "avg_cooling")
-    rl_avg_energy = _mean(rl_metrics_list, "avg_energy")
-    rl_violations = sum(d["violations"] for d in rl_metrics_list)
+    rl_avg_temp = comparison["rl"]["avg_temp"]
+    rl_max_temp = comparison["rl"]["max_temp"]
+    rl_avg_cool = comparison["rl"]["avg_cooling"]
+    rl_avg_energy = comparison["rl"]["avg_energy"]
+    rl_violations = comparison["rl"]["violations"]
 
-    pid_avg_temp   = _mean(pid_metrics_list, "avg_temp")
-    pid_max_temp   = max(d["max_temp"] for d in pid_metrics_list)
-    pid_avg_cool   = _mean(pid_metrics_list, "avg_cooling")
-    pid_avg_energy = _mean(pid_metrics_list, "avg_energy")
-    pid_violations = sum(d["violations"] for d in pid_metrics_list)
+    pid_avg_temp = comparison["pid"]["avg_temp"]
+    pid_max_temp = comparison["pid"]["max_temp"]
+    pid_avg_cool = comparison["pid"]["avg_cooling"]
+    pid_avg_energy = comparison["pid"]["avg_energy"]
+    pid_violations = comparison["pid"]["violations"]
 
-    # Energy saved percentage (clamped)
-    if pid_avg_energy > 1e-9:
-        raw_saved = ((pid_avg_energy - rl_avg_energy) / pid_avg_energy) * 100.0
-    else:
-        raw_saved = 0.0
-    energy_saved = max(min(raw_saved, 100.0), -50.0)
+    energy_saved = comparison["energy_saved_pct"]
 
     print("\n" + "-" * 70)
     print(f"{'Metric':<35} {'RL Agent':>12} {'PID':>12}")
@@ -508,7 +522,12 @@ def main():
         print(f"Success Rate       : {eval_results['success_rate'] * 100:.1f}%")
 
         # Also run RL vs PID comparison in eval mode
-        _final_evaluation(pipeline, config, num_eval_eps=args.eval_episodes)
+        _final_evaluation(
+            pipeline,
+            config,
+            num_eval_eps=args.eval_episodes,
+            config_path=args.config,
+        )
         return
 
     # ------------------------------------------------------------------
@@ -556,7 +575,12 @@ def main():
     # ------------------------------------------------------------------
     # Step 9: Final evaluation – RL vs PID
     # ------------------------------------------------------------------
-    _final_evaluation(pipeline, config, num_eval_eps=5)
+    _final_evaluation(
+        pipeline,
+        config,
+        num_eval_eps=5,
+        config_path=args.config,
+    )
 
     print("\n" + "=" * 70)
     print("All done! Training pipeline completed.")

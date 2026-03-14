@@ -31,14 +31,15 @@ class CoolingMetrics:
         """
         cooling_array = np.array(cooling_history)
         
-        # Average power consumption (proportional to cooling level)
+        # Average cooling level (raw control effort)
         avg_cooling = np.mean(cooling_array)
+        energy_array = np.square(cooling_array)
         
         # Peak power consumption
         peak_cooling = np.max(cooling_array)
         
-        # Total energy (integrated cooling over time)
-        total_energy = np.sum(cooling_array) * timestep / 3600.0  # Convert to kWh equivalent
+        # Total energy uses the training-consistent proxy: cooling^2
+        total_energy = np.sum(energy_array) * timestep / 3600.0  # Convert to kWh equivalent
         
         # Cooling variability (efficiency indicator)
         cooling_std = np.std(cooling_array)
@@ -277,8 +278,8 @@ class CoolingMetrics:
                 "energy_saved_percent": 0.0,
             }
 
-        rl_total = float(sum(np.mean(c) for c in rl_cooling_history[:n]))
-        bl_total = float(sum(np.mean(c) for c in baseline_cooling_history[:n]))
+        rl_total = float(sum(np.mean(c ** 2) for c in rl_cooling_history[:n]))
+        bl_total = float(sum(np.mean(c ** 2) for c in baseline_cooling_history[:n]))
 
         rl_avg = rl_total / n
         bl_avg = bl_total / n

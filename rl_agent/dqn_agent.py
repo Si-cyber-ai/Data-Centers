@@ -278,10 +278,13 @@ class DQNAgent:
         # Update statistics
         self.steps_done += 1
         self.losses.append(loss.item())
-        
-        # Decay epsilon
-        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
-        
+
+        # NOTE: Epsilon is NOT decayed here.
+        # It is decayed once per episode by the training pipeline so that the
+        # agent explores for ~200-300 full episodes before converging to its
+        # greedy policy.  Decaying per-step caused epsilon to collapse to 0.05
+        # after ~1 episode (596 steps), eliminating almost all exploration.
+
         return loss.item()
     
     def update_target_network(self):
